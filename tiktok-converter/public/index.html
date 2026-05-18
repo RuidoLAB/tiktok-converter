@@ -196,6 +196,13 @@ textarea::placeholder { color: #bbb8b0; }
 .link-item.ok   { border-color: #a8d5b8; background: var(--success-bg); }
 .link-item.fail { border-color: #f0bab4; background: var(--danger-bg); }
 .link-item.wait { border-color: #f0d9a0; background: var(--warning-bg); }
+.link-item.dup  { border-color: #f0bab4; background: var(--danger-bg); opacity: 0.7; }
+
+.dup-badge {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+  background: var(--danger); color: #fff;
+  padding: 2px 7px; border-radius: 3px; flex-shrink: 0;
+}
 
 .status-icon { font-size: 14px; flex-shrink: 0; margin-top: 2px; }
 
@@ -264,19 +271,20 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
   </div>
 
   <div class="results" id="results">
-    <div class="stats">
+    <div class="stats" style="grid-template-columns: repeat(4, 1fr)">
       <div class="stat"><div class="stat-n total" id="sTotal">0</div><div class="stat-l">total</div></div>
       <div class="stat"><div class="stat-n ok"    id="sOk">0</div><div class="stat-l">convertidos</div></div>
       <div class="stat"><div class="stat-n fail"  id="sFail">0</div><div class="stat-l">fallidos</div></div>
+      <div class="stat"><div class="stat-n" style="color:var(--danger)" id="sDup">0</div><div class="stat-l">duplicados</div></div>
     </div>
 
     <div class="link-list" id="linkList"></div>
 
     <div class="card">
-      <div class="label">Resultado final</div>
+      <div class="label">Resultado final — sin duplicados</div>
       <textarea class="out-area" id="output" readonly></textarea>
       <div class="btn-row" style="margin-top:1rem">
-        <button class="btn btn-primary" id="btnCopyAll" onclick="copyAll()">Copiar todo</button>
+        <button class="btn btn-primary" id="btnCopyAll" onclick="copyAll()">Copiar sin duplicados</button>
         <button class="btn btn-outline" onclick="download()">Descargar .txt</button>
       </div>
     </div>
@@ -288,7 +296,15 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
 
 <script>
   let resolved = [];
-  let nOk = 0, nFail = 0;
+  let nOk = 0, nFail = 0, nDup = 0;
+
+  // extraer el video ID de una URL de TikTok para comparar duplicados
+  function videoId(url) {
+    try {
+      const m = url.match(/\/video\/(\d+)/);
+      return m ? m[1] : url;
+    } catch { return url; }
+  }
 
   function lines() {
     return document.getElementById('input').value
@@ -324,11 +340,24 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
     return data.result;
   }
 
+  function updateOutput() {
+    const seen = new Set();
+    const unique = resolved.filter(r => {
+      if (!r) return false;
+      const id = videoId(r);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    document.getElementById('output').value = unique.join('\n');
+  }
+
   async function run() {
     const ls = lines();
     if (!ls.length) return;
 
-    resolved = []; nOk = 0; nFail = 0;
+    resolved = []; nOk = 0; nFail = 0; nDup = 0;
+    const seenIds = new Set();
 
     document.getElementById('results').style.display = 'block';
     document.getElementById('linkList').innerHTML = '';
@@ -336,10 +365,10 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
     document.getElementById('sTotal').textContent = ls.length;
     document.getElementById('sOk').textContent = '0';
     document.getElementById('sFail').textContent = '0';
+    document.getElementById('sDup').textContent = '0';
     document.getElementById('progressWrap').style.display = 'block';
     document.getElementById('btnConvert').disabled = true;
 
-    // pre-render filas pending
     ls.forEach((link, i) => {
       const row = document.createElement('div');
       row.className = 'link-item wait';
@@ -361,22 +390,36 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
 
       try {
         result = await expandOne(link);
-        resolved.push(result);
-        nOk++;
+        const vid = videoId(result);
+        const isDup = seenIds.has(vid);
 
-        row.className = 'link-item ok';
-        row.querySelector('.status-icon').textContent = '✅';
-        toDiv.className = 'link-to';
-        toDiv.innerHTML = `<a href="${result}" target="_blank" rel="noopener">${result}</a>`;
-
-        const btn = document.createElement('button');
-        btn.className = 'copy-one'; btn.textContent = 'copiar';
-        btn.onclick = () => {
-          navigator.clipboard.writeText(result);
-          btn.textContent = '✓'; btn.classList.add('done');
-          setTimeout(() => { btn.textContent = 'copiar'; btn.classList.remove('done'); }, 1500);
-        };
-        row.appendChild(btn);
+        if (isDup) {
+          nDup++;
+          resolved.push(null); // null = duplicado, no se incluye en output
+          row.className = 'link-item dup';
+          row.querySelector('.status-icon').textContent = '🔁';
+          toDiv.className = 'link-to fail-text';
+          toDiv.innerHTML = `<a href="${result}" target="_blank" rel="noopener" style="color:var(--danger)">${result}</a>`;
+          const badge = document.createElement('span');
+          badge.className = 'dup-badge'; badge.textContent = 'DUPLICADO';
+          row.appendChild(badge);
+        } else {
+          seenIds.add(vid);
+          resolved.push(result);
+          nOk++;
+          row.className = 'link-item ok';
+          row.querySelector('.status-icon').textContent = '✅';
+          toDiv.className = 'link-to';
+          toDiv.innerHTML = `<a href="${result}" target="_blank" rel="noopener">${result}</a>`;
+          const btn = document.createElement('button');
+          btn.className = 'copy-one'; btn.textContent = 'copiar';
+          btn.onclick = () => {
+            navigator.clipboard.writeText(result);
+            btn.textContent = '✓'; btn.classList.add('done');
+            setTimeout(() => { btn.textContent = 'copiar'; btn.classList.remove('done'); }, 1500);
+          };
+          row.appendChild(btn);
+        }
 
       } catch {
         resolved.push(link);
@@ -389,9 +432,10 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
 
       document.getElementById('sOk').textContent = nOk;
       document.getElementById('sFail').textContent = nFail;
+      document.getElementById('sDup').textContent = nDup;
       document.getElementById('progressFill').style.width = `${((i+1)/ls.length)*100}%`;
       document.getElementById('progressLabel').textContent = `${i+1} / ${ls.length}`;
-      document.getElementById('output').value = resolved.join('\n');
+      updateOutput();
     }
 
     document.getElementById('btnConvert').disabled = false;
@@ -401,7 +445,7 @@ https://vm.tiktok.com/ZS9vMas/" oninput="updateCount()"></textarea>
     navigator.clipboard.writeText(document.getElementById('output').value).then(() => {
       const btn = document.getElementById('btnCopyAll');
       btn.textContent = '✓ Copiado';
-      setTimeout(() => { btn.textContent = 'Copiar todo'; }, 2000);
+      setTimeout(() => { btn.textContent = 'Copiar sin duplicados'; }, 2000);
     });
   }
 
