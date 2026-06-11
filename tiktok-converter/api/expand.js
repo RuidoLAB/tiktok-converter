@@ -19,108 +19,82 @@ export default async function handler(req, res) {
 }
 
 async function expandTikTok(url) {
-  // Si ya es una URL de escritorio válida (con @usuario), devolverla limpia
-  if (url.includes("tiktok.com/@") && url.includes("/video/")) {
-    const m = url.match(/tiktok\.com\/@[^/]+\/video\/\d+/);
-    if (m) return "https://www." + m[0];
-  }
+  // Si ya es URL válida con @usuario
+  if (isValidTikTokUrl(url)) return cleanUrl(url);
 
   const headers = {
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "identity",
     "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
   };
 
-  // Primer intento: seguir redirect con fetch
-  let finalUrl = null;
-  try {
-    const resp = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      headers,
-    });
-    finalUrl = resp.url;
-  } catch (e) {
-    throw new Error("Fetch failed: " + e.message);
+  // Paso 1: seguir redirect y obtener HTML
+  const resp = await fetch(url, { method: "GET", redirect: "follow", headers });
+  const finalUrl = resp.url;
+  const html = await resp.text();
+
+  // Paso 2: si la URL ya tiene @usuario, limpiar y devolver
+  if (isValidTikTokUrl(finalUrl)) return cleanUrl(finalUrl);
+
+  // Paso 3: buscar el username en __NEXT_DATA__ (JSON embebido en el HTML)
+  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextDataMatch) {
+    try {
+      const data = JSON.parse(nextDataMatch[1]);
+      // El username puede estar en varias rutas del JSON
+      const author =
+        data?.props?.pageProps?.itemInfo?.itemStruct?.author?.uniqueId ||
+        data?.props?.pageProps?.videoData?.itemInfos?.authorName ||
+        data?.props?.pageProps?.itemInfo?.itemStruct?.author?.id;
+      const videoIdVal =
+        data?.props?.pageProps?.itemInfo?.itemStruct?.id ||
+        data?.props?.pageProps?.videoData?.itemInfos?.id;
+
+      if (author && videoIdVal) {
+        return `https://www.tiktok.com/@${author}/video/${videoIdVal}`;
+      }
+    } catch (_) {}
   }
 
-  // Si la URL tiene @usuario válido, limpiar y devolver
-  if (finalUrl && isValidTikTokUrl(finalUrl)) {
-    return cleanUrl(finalUrl);
+  // Paso 4: buscar "uniqueId" en cualquier JSON del HTML
+  const uniqueIdMatch = html.match(/"uniqueId"\s*:\s*"([^"]+)"/);
+  const videoIdMatch = html.match(/"id"\s*:\s*"(\d{15,20})"/);
+  if (uniqueIdMatch && videoIdMatch) {
+    return `https://www.tiktok.com/@${uniqueIdMatch[1]}/video/${videoIdMatch[1]}`;
   }
 
-  // Segundo intento: HEAD request para ver si el redirect va a una URL diferente
-  try {
-    const resp2 = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      headers,
-    });
-    if (isValidTikTokUrl(resp2.url)) {
-      return cleanUrl(resp2.url);
-    }
-  } catch (_) {}
+  // Paso 5: buscar og:url o canonical
+  const ogUrl = html.match(/<meta[^>]+property="og:url"[^>]+content="([^"]+)"/i)?.[1]
+    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:url"/i)?.[1];
+  if (ogUrl && isValidTikTokUrl(ogUrl)) return cleanUrl(ogUrl);
 
-  // Tercer intento: leer el HTML y extraer la URL canónica o og:url
-  try {
-    const resp3 = await fetch(url, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        ...headers,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      },
-    });
-    const html = await resp3.text();
+  const canonical = html.match(/<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i)?.[1];
+  if (canonical && isValidTikTokUrl(canonical)) return cleanUrl(canonical);
 
-    // Buscar og:url
-    const ogUrl = html.match(/<meta[^>]+property="og:url"[^>]+content="([^"]+)"/i)?.[1]
-      || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:url"/i)?.[1];
-    if (ogUrl && isValidTikTokUrl(ogUrl)) return cleanUrl(ogUrl);
+  // Paso 6: buscar cualquier URL de video en el HTML
+  const videoUrl = html.match(/https:\/\/www\.tiktok\.com\/@[^/"\\]+\/video\/\d+/)?.[0];
+  if (videoUrl) return cleanUrl(videoUrl);
 
-    // Buscar canonical
-    const canonical = html.match(/<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i)?.[1];
-    if (canonical && isValidTikTokUrl(canonical)) return cleanUrl(canonical);
-
-    // Buscar cualquier URL de video en el HTML
-    const videoUrl = html.match(/https:\/\/www\.tiktok\.com\/@[^/"]+\/video\/\d+/)?.[0];
-    if (videoUrl) return cleanUrl(videoUrl);
-
-  } catch (_) {}
-
-  // Si solo tenemos el video ID pero sin usuario, devolver igual (mejor que nada)
-  if (finalUrl && finalUrl.includes("tiktok.com") && finalUrl.includes("/video/")) {
-    return cleanUrl(finalUrl);
-  }
-
-  return null;
+  // Si todo falla, devolver lo que tenemos
+  return finalUrl.includes("tiktok.com") ? cleanUrl(finalUrl) : null;
 }
 
 function isValidTikTokUrl(url) {
-  return (
-    url &&
-    url.includes("tiktok.com") &&
-    url.includes("/video/") &&
-    url.includes("/@") &&
-    !url.match(/\/@\/video\//) // excluir @vacío
-  );
+  return url && url.includes("tiktok.com/@") && url.includes("/video/") && !url.match(/\/@\/video\//);
 }
 
 function cleanUrl(url) {
   try {
     const u = new URL(url);
-    const keepParams = ["_r", "_t"];
-    const params = new URLSearchParams();
+    const keep = ["_r", "_t"];
+    const p = new URLSearchParams();
     for (const [k, v] of u.searchParams) {
-      if (keepParams.includes(k)) params.set(k, v);
+      if (keep.includes(k)) p.set(k, v);
     }
     const base = "https://www.tiktok.com" + u.pathname;
-    const qs = params.toString();
-    return qs ? `${base}?${qs}` : base;
-  } catch {
-    return url;
-  }
+    const qs = p.toString();
+    return qs ? base + "?" + qs : base;
+  } catch { return url; }
 }
