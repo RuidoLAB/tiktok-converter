@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 }
 
 async function expandTikTok(url) {
-  // Si ya es URL válida con @usuario
+  // Si ya es URL válida con @usuario (video o photo)
   if (isValidTikTokUrl(url)) return cleanUrl(url);
 
   const headers = {
@@ -30,42 +30,14 @@ async function expandTikTok(url) {
     "Connection": "keep-alive",
   };
 
-  // Paso 1: seguir redirect y obtener HTML
   const resp = await fetch(url, { method: "GET", redirect: "follow", headers });
   const finalUrl = resp.url;
   const html = await resp.text();
 
-  // Paso 2: si la URL ya tiene @usuario, limpiar y devolver
+  // Si la URL final ya tiene @usuario, limpiar y devolver
   if (isValidTikTokUrl(finalUrl)) return cleanUrl(finalUrl);
 
-  // Paso 3: buscar el username en __NEXT_DATA__ (JSON embebido en el HTML)
-  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (nextDataMatch) {
-    try {
-      const data = JSON.parse(nextDataMatch[1]);
-      // El username puede estar en varias rutas del JSON
-      const author =
-        data?.props?.pageProps?.itemInfo?.itemStruct?.author?.uniqueId ||
-        data?.props?.pageProps?.videoData?.itemInfos?.authorName ||
-        data?.props?.pageProps?.itemInfo?.itemStruct?.author?.id;
-      const videoIdVal =
-        data?.props?.pageProps?.itemInfo?.itemStruct?.id ||
-        data?.props?.pageProps?.videoData?.itemInfos?.id;
-
-      if (author && videoIdVal) {
-        return `https://www.tiktok.com/@${author}/video/${videoIdVal}`;
-      }
-    } catch (_) {}
-  }
-
-  // Paso 4: buscar "uniqueId" en cualquier JSON del HTML
-  const uniqueIdMatch = html.match(/"uniqueId"\s*:\s*"([^"]+)"/);
-  const videoIdMatch = html.match(/"id"\s*:\s*"(\d{15,20})"/);
-  if (uniqueIdMatch && videoIdMatch) {
-    return `https://www.tiktok.com/@${uniqueIdMatch[1]}/video/${videoIdMatch[1]}`;
-  }
-
-  // Paso 5: buscar og:url o canonical
+  // Buscar og:url o canonical primero — TikTok pone el tipo correcto (video/photo) ahí
   const ogUrl = html.match(/<meta[^>]+property="og:url"[^>]+content="([^"]+)"/i)?.[1]
     || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:url"/i)?.[1];
   if (ogUrl && isValidTikTokUrl(ogUrl)) return cleanUrl(ogUrl);
@@ -73,16 +45,37 @@ async function expandTikTok(url) {
   const canonical = html.match(/<link[^>]+rel="canonical"[^>]+href="([^"]+)"/i)?.[1];
   if (canonical && isValidTikTokUrl(canonical)) return cleanUrl(canonical);
 
-  // Paso 6: buscar cualquier URL de video en el HTML
-  const videoUrl = html.match(/https:\/\/www\.tiktok\.com\/@[^/"\\]+\/video\/\d+/)?.[0];
-  if (videoUrl) return cleanUrl(videoUrl);
+  // Buscar en __NEXT_DATA__
+  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextDataMatch) {
+    try {
+      const data = JSON.parse(nextDataMatch[1]);
+      const item = data?.props?.pageProps?.itemInfo?.itemStruct;
+      if (item) {
+        const author = item?.author?.uniqueId;
+        const id = item?.id;
+        // Detectar si es photo o video
+        const isPhoto = item?.imagePost || item?.mediaType === 'image' || (item?.imageList && item.imageList.length > 0);
+        const type = isPhoto ? "photo" : "video";
+        if (author && id) return `https://www.tiktok.com/@${author}/${type}/${id}`;
+      }
+    } catch (_) {}
+  }
 
-  // Si todo falla, devolver lo que tenemos
+  // Buscar cualquier URL video o photo en el HTML
+  const contentUrl = html.match(/https:\/\/www\.tiktok\.com\/@[^/"\\]+\/(video|photo)\/\d+/)?.[0];
+  if (contentUrl) return cleanUrl(contentUrl);
+
   return finalUrl.includes("tiktok.com") ? cleanUrl(finalUrl) : null;
 }
 
 function isValidTikTokUrl(url) {
-  return url && url.includes("tiktok.com/@") && url.includes("/video/") && !url.match(/\/@\/video\//);
+  return (
+    url &&
+    (url.includes("tiktok.com/@")) &&
+    (url.includes("/video/") || url.includes("/photo/")) &&
+    !url.match(/\/@\/(video|photo)\//)
+  );
 }
 
 function cleanUrl(url) {
